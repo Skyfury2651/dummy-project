@@ -1,0 +1,2 @@
+Port 137: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)
+Port 137: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)
