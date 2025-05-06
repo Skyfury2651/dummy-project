@@ -1,1 +1,5 @@
 /target
+/other_errors.txt
+/refused_ports.txt
+/resource_errors.txt
+/timeout_ports.txt
