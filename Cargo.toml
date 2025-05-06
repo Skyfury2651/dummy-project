@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1.44.2", features = ["full"] }
 futures = "0.3"
+netstat2 = "0.11.1"
+sysinfo = "0.29.10"

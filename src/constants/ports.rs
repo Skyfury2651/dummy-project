@@ -6,4 +6,5 @@ use std::ops::Range;
 // ];
 // pub const WEB_PORTS: &[u16] = &[80, 443];
 // pub const DB_PORTS: &[u16] = &[3306, 5432, 1433, 6379];
-pub const ALL_PORTS: Range<u16> = 1..65535;
+pub const ALL_PORTS: Range<u16> = 1..1000;
+// pub const ALL_PORTS: Range<u16> = 1..65535;

@@ -1,13 +1,13 @@
 use tokio::{net::TcpStream, sync::{Semaphore, mpsc}};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::net::IpAddr;
-
+use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo};
+use sysinfo::{System, SystemExt, ProcessExt, Pid};
 
 use tokio::net::UdpSocket;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time;
-
 
 use crate::constants::ports::ALL_PORTS;
 
@@ -26,24 +26,46 @@ struct PortLog {
     message: String,
 }
 
-pub async fn port_check(ip: &str) -> Result<bool, String> {
-    // Check TCP ports first
-    let tcp_open = scan_tcp_ports(ip).await;
-    if tcp_open {
-        return Ok(true);
-    }
-
-    // If no TCP ports are open, check UDP ports
-    let udp_open = scan_udp_ports(ip).await;
-    Ok(udp_open)
+#[derive(Debug)]
+pub struct OpenPort {
+    pub port: u16,
+    pub port_type: PortType,
 }
 
-pub async fn scan_tcp_ports(ip: &str) -> bool {
+#[derive(Debug)]
+pub enum PortType {
+    TCP,
+    UDP,
+}
+
+pub async fn port_check(ip: &str) -> Result<Vec<OpenPort>, String> {
+    let mut open_ports = Vec::new();
+    
+    // Check TCP ports
+    let tcp_ports = scan_tcp_ports(ip).await;
+    open_ports.extend(tcp_ports.into_iter().map(|port| OpenPort {
+        port,
+        port_type: PortType::TCP,
+    }));
+
+    // Check UDP ports
+    let udp_ports = scan_udp_ports(ip).await;
+    open_ports.extend(udp_ports.into_iter().map(|port| OpenPort {
+        port,
+        port_type: PortType::UDP,
+    }));
+
+    Ok(open_ports)
+}
+
+pub async fn scan_tcp_ports(ip: &str) -> Vec<u16> {
     let ports = ALL_PORTS;
+    let total_ports = ports.len();
     let ip_addr: IpAddr = ip.parse().unwrap();
     let semaphore = std::sync::Arc::new(Semaphore::new(100));
     let (log_tx, mut log_rx) = mpsc::channel::<PortLog>(1000);
-    let mut found_open_port = false;
+    let mut open_ports = Vec::new();
+    let mut scanned = 0;
 
     // Spawn logger task
     tokio::spawn(async move {
@@ -85,7 +107,7 @@ pub async fn scan_tcp_ports(ip: &str) -> bool {
             match TcpStream::connect(&addr).await {
                 Ok(_) => {
                     println!("TCP Port {} is open", port);
-                    true
+                    Some(port)
                 },
                 Err(e) => {
                     let err_str = e.to_string();
@@ -106,26 +128,31 @@ pub async fn scan_tcp_ports(ip: &str) -> bool {
                             message: err_str,
                         })
                         .await;
-                    false
+                    None
                 }
             }
         }));
     }
 
     while let Some(result) = tasks.next().await {
-        if let Ok(true) = result {
-            found_open_port = true;
-            break;
+        scanned += 1;
+        let percent = (scanned as f32 / total_ports as f32 * 100.0) as u32;
+        print!("\rTCP Scan Progress: {}%", percent);
+        if let Ok(Some(port)) = result {
+            open_ports.push(port);
         }
     }
+    println!();
 
-    found_open_port
+    open_ports
 }
 
-pub async fn scan_udp_ports(ip: &str) -> bool {
+pub async fn scan_udp_ports(ip: &str) -> Vec<u16> {
     let ports = ALL_PORTS;
+    let total_ports = ports.len();
     let semaphore = std::sync::Arc::new(Semaphore::new(100));
-    let mut found_open_port = false;
+    let mut open_ports = Vec::new();
+    let mut scanned = 0;
 
     let mut tasks = FuturesUnordered::new();
 
@@ -138,21 +165,24 @@ pub async fn scan_udp_ports(ip: &str) -> bool {
             match check_udp_port(&ip, port).await {
                 Ok(true) => {
                     println!("UDP Port {} is open", port);
-                    true
+                    Some(port)
                 },
-                _ => false
+                _ => None
             }
         }));
     }
 
     while let Some(result) = tasks.next().await {
-        if let Ok(true) = result {
-            found_open_port = true;
-            break;
+        scanned += 1;
+        let percent = (scanned as f32 / total_ports as f32 * 100.0) as u32;
+        print!("\rUDP Scan Progress: {}%", percent);
+        if let Ok(Some(port)) = result {
+            open_ports.push(port);
         }
     }
+    println!();
 
-    found_open_port
+    open_ports
 }
 
 pub async fn check_udp_port(target_ip: &str, port: u16) -> Result<bool, String> {
@@ -177,4 +207,39 @@ pub async fn check_udp_port(target_ip: &str, port: u16) -> Result<bool, String> 
         Ok(Err(e)) => Err(format!("Receive error: {}", e)),
         Err(_) => Ok(false),
     }
+}
+
+pub async fn port_service_check(port: u16) -> Result<String, String> {
+    let sockets = get_sockets_info(
+        AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
+        ProtocolFlags::TCP | ProtocolFlags::UDP,
+    ).map_err(|e| format!("Failed to get socket info: {}", e))?;
+
+    let mut sys = System::new();
+    sys.refresh_all();
+
+    for socket in sockets {
+        match socket.protocol_socket_info {
+            ProtocolSocketInfo::Tcp(tcp_info) => {
+                if tcp_info.local_port == port {
+                    if let Some(pid) = socket.associated_pids.first() {
+                        if let Some(process) = sys.process(Pid::from(*pid as usize)) {
+                            return Ok(format!("TCP: {} (PID: {})", process.name(), pid));
+                        }
+                    }
+                }
+            },
+            ProtocolSocketInfo::Udp(udp_info) => {
+                if udp_info.local_port == port {
+                    if let Some(pid) = socket.associated_pids.first() {
+                        if let Some(process) = sys.process(Pid::from(*pid as usize)) {
+                            return Ok(format!("UDP: {} (PID: {})", process.name(), pid));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(format!("No service found using port {}", port))
 }
